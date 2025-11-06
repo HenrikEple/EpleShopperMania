@@ -491,6 +491,7 @@
 
         let ws, myId = null;
         const peers = new Map();
+        let pendingSnapshot = null;
 
         function addPeer(id,p){
           if (peers.has(id)) return;
@@ -660,17 +661,6 @@
       const scene = createScene();
       engine.runRenderLoop(()=>{ if (scene && scene.activeCamera) scene.render(); });
       addEventListener('resize', ()=> engine.resize());
-
-      // --- Minimal same-origin WS client (Railway-friendly) ---
-      const WS_URL = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host;
-      let ws, myId = null;
-      function send(t,p){ if (ws && ws.readyState===1) ws.send(JSON.stringify({t,p})); }
-      function connectWS(){
-        ws = new WebSocket(WS_URL);
-        ws.onopen = ()=> send('join', { x: 0, z: 0, name: (window.playerName||'Player') });
-        ws.onmessage = ()=>{}; ws.onclose = ()=> setTimeout(connectWS, 1000);
-      }
-      connectWS();
 
       // Error overlay
       (function(){

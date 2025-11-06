@@ -32,28 +32,65 @@ const MIME = {
 };
 
 const httpServer = createServer((req, res) => {
-  // health endpoints Railway can probe
-  if (req.method === "HEAD" || req.url === "/health" || req.url === "/_health") {
-    res.writeHead(200, { "content-type": "text/plain" });
+  const method = req.method || "GET";
+  const rawUrl = req.url || "/";
+  const urlPath = decodeURIComponent(rawUrl.split("?")[0]);
+
+  // health endpoints (GET/HEAD only)
+  if ((urlPath === "/health" || urlPath === "/_health") && (method === "GET" || method === "HEAD")) {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" });
     res.end("ok");
     return;
   }
-  // static
-  const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+
+  // only allow GET/HEAD for static assets
+  if (method !== "GET" && method !== "HEAD") {
+    res.writeHead(405, { "content-type": "text/plain; charset=utf-8", "allow": "GET, HEAD" });
+    res.end("method not allowed");
+    return;
+  }
+
+  // normalize and map to /public
   let fsPath = normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
   if (fsPath === "/" || fsPath === "") fsPath = "/index.html";
   const full = join(PUBLIC_DIR, fsPath);
+
   stat(full, (err, st) => {
     if (err || !st.isFile()) {
-      res.writeHead(404, { "content-type": "text/plain" });
+      // single-page-app style fallback: try /index.html if path had no extension
+      const hasExt = /\.[a-z0-9]+$/i.test(fsPath);
+      if (!hasExt) {
+        const fallback = join(PUBLIC_DIR, "index.html");
+        stat(fallback, (e2, st2) => {
+          if (e2 || !st2.isFile()) {
+            res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+            res.end("not found");
+            return;
+          }
+          res.writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-cache"
+          });
+          if (method === "HEAD") return res.end();
+          createReadStream(fallback).pipe(res);
+        });
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       res.end("not found");
       return;
     }
+
     const ext = extname(full).toLowerCase();
     res.writeHead(200, {
       "content-type": MIME[ext] || "application/octet-stream",
       "cache-control": ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable"
     });
+
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
     createReadStream(full).pipe(res);
   });
 });
@@ -180,6 +217,13 @@ const interval = setInterval(() => {
 }, 30000);
 
 wss.on("close", () => clearInterval(interval));
+
+function shutdown() {
+  try { wss.clients.forEach(ws => ws.terminate()); } catch {}
+  try { httpServer.close(() => process.exit(0)); } catch { process.exit(0); }
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP+WS listening on :${PORT}`);
