@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Babylon.js – Multiplayer Throw & Score</title>
+    <style>
+      html, body { height: 100%; margin: 0; overflow: hidden; }
+      #renderCanvas { width: 100%; height: 100%; display: block; touch-action: none; }
+
+      .ui { position: fixed; inset: 0; pointer-events: none; }
+      .hint, .banner, #scoreboard, #controls {
+        background: rgba(0,0,0,.6); color: #fff; border-radius: 8px;
+        font: 14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        padding: 8px 10px; pointer-events: auto;
+      }
+      .banner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); }
+      .hint   { position: absolute; left: 12px; bottom: 12px; }
+      #scoreboard { position: absolute; right: 12px; top: 12px; min-width: 200px; }
+      #scoreboard h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+      #scoreboard ul { list-style: none; padding: 0; margin: 0; }
+      #scoreboard li { display: flex; justify-content: space-between; padding: 2px 0; }
+      #ballCounters { margin-top: 6px; font-size: 13px; opacity: .9; }
+
+      /* HUD locked to player */
+      .hud { position: absolute; inset: 0; pointer-events: none; }
+      #hudCircle {
+        position: absolute;
+        border: 1px dashed rgba(255,255,255,.35);
+        border-radius: 50%;
+        width: 0; height: 0;
+        transform: translate(-50%,-50%);
+      }
+      #aimDot {
+        position: absolute; width: 12px; height: 12px; transform: translate(-50%,-50%);
+        border-radius: 50%;
+        background: rgba(66, 236, 160, .95);
+        box-shadow: 0 0 10px rgba(66,236,160,.7);
+      }
+      #hudInfo {
+        position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+        background: rgba(0,0,0,.6); color: #fff; padding: 6px 10px; border-radius: 8px;
+        font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; pointer-events: auto;
+      }
+
+      /* Throw force control */
+      #controls {
+        position: absolute; left: 12px; top: 12px; width: 260px;
+        display: grid; gap: 6px;
+      }
+      #forceVal { font-weight: 600; }
+      input[type="range"] { width: 100%; accent-color: #44e1a0; }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <div class="ui">
+      <div class="banner">Aim by moving your mouse/trackpad. Shift+R resets balls and scores.</div>
+      <div class="hint">W forward · S backward · A/D rotate · Space jump · F throw · Walk into a ball to pick up</div>
+
+      <div id="controls">
+        <div>Throw force: <span id="forceVal">1.00×</span></div>
+        <input id="forceSlider" type="range" min="0.5" max="2.0" step="0.01" value="1.00" />
+      </div>
+
+      <div id="scoreboard">
+        <h3>Score</h3>
+        <ul id="scoreList"></ul>
+        <div id="ballCounters">Balls: <span id="ballTotal">0</span> total · Scored: <span id="ballScored">0</span></div>
+      </div>
+
+      <div class="hud">
+        <div id="hudCircle" aria-hidden="true"></div>
+        <div id="aimDot" aria-hidden="true"></div>
+        <div id="hudInfo"><span id="hudText">Aim: —</span></div>
+      </div>
+    </div>
+
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script>
+      const canvas = document.getElementById("renderCanvas");
+      const engine = new BABYLON.Engine(canvas, true);
+
+      // Ask name
+      let playerName = "";
+      while (!playerName) {
+        playerName = prompt("Enter your player name:");
+        if (playerName) playerName = playerName.trim().slice(0, 20);
+      }
+
+      function createScene() {
+        const scene = new BABYLON.Scene(engine);
+        scene.clearColor = new BABYLON.Color4(0.72, 0.84, 1.0, 1.0);
+        scene.collisionsEnabled = true;
+
+        // Lights
+        const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
+        hemi.intensity = 0.6;
+        const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.6, -1.0, -0.2), scene);
+        sun.position = new BABYLON.Vector3(40, 60, 20);
+        sun.intensity = 0.9;
+        const sg = new BABYLON.ShadowGenerator(1024, sun);
+        sg.useExponentialShadowMap = true;
+
+        // Helpers
+        function makeChecker(size=1024, squares=16, a="#3f4d56", b="#34414a"){
+          const dt = new BABYLON.DynamicTexture("checker", size, scene, true);
+          const ctx = dt.getContext(); const s = size / squares;
+          for (let y=0; y<squares; y++) for (let x=0; x<squares; x++){
+            ctx.fillStyle = ((x+y) % 2 === 0) ? a : b;
+            ctx.fillRect(x*s, y*s, s, s);
+          }
+          dt.update(); return dt;
+        }
+        function worldToScreen(pos3){
+          const world = BABYLON.Matrix.Identity();
+          const transform = scene.getTransformMatrix();
+          const vp = scene.activeCamera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight());
+          const projected = BABYLON.Vector3.Project(pos3, world, transform, vp);
+          return { x: projected.x, y: projected.y, z: projected.z };
+        }
+
+        // Arena
+        const MAP_W = 240, MAP_H = 160;
+        const ARENA = { minX: -MAP_W/2, maxX: MAP_W/2, minZ: -MAP_H/2, maxZ: MAP_H/2 };
+
+        const ground = BABYLON.MeshBuilder.CreateGround("ground", {width: MAP_W, height: MAP_H}, scene);
+        const gMat = new BABYLON.StandardMaterial("gMat", scene);
+        gMat.specularColor = new BABYLON.Color3(0,0,0);
+        gMat.diffuseTexture = makeChecker();
+        const floorTex = new BABYLON.Texture("textures/floor_diffuse.jpg", scene, false, true, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
+        floorTex.onLoadObservable.addOnce(()=>{ gMat.diffuseTexture = floorTex; floorTex.uScale = 12; floorTex.vScale = 12; });
+        ground.material = gMat; ground.checkCollisions = true; ground.receiveShadows = true;
+
+        // Walls
+        const WALLS = [];
+        const baseWallTex = new BABYLON.Texture("textures/wall_diffuse.jpg", scene);
+        baseWallTex.wrapU = baseWallTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+        baseWallTex.anisotropicFilteringLevel = 8;
+        const baseWallMat = new BABYLON.StandardMaterial("wallMatBase", scene);
+        baseWallMat.diffuseTexture = baseWallTex;
+        baseWallMat.specularColor = new BABYLON.Color3(0,0,0);
+        const TILE = 2;
+        function makeWallMat(w, d, h) {
+          const m  = baseWallMat.clone("wallMat_" + Math.random().toString(36).slice(2));
+          const tx = baseWallTex.clone();
+          tx.wrapU = tx.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+          tx.anisotropicFilteringLevel = baseWallTex.anisotropicFilteringLevel;
+          tx.vScale = h / TILE;
+          const alongX = (w >= d);
+          if (alongX) { tx.uScale = w / TILE; tx.wAng = 0; }
+          else { tx.uScale = d / TILE; tx.wAng = Math.PI / 2; }
+          m.diffuseTexture = tx; return m;
+        }
+        function addWall(x, z, w, d, h = 6) {
+          const box = BABYLON.MeshBuilder.CreateBox("wall", { width: w, height: h, depth: d }, scene);
+          box.position = new BABYLON.Vector3(x, h / 2, z);
+          box.checkCollisions = true;
+          box.receiveShadows = true;
+          box.material = makeWallMat(w, d, h);
+          WALLS.push({ minX: x - w/2, maxX: x + w/2, minZ: z - d/2, maxZ: z + d/2, h });
+          return box;
+        }
+        // Closed border + partitions
+        addWall(0, -MAP_H/2, MAP_W, 2, 6);
+        addWall(0,  MAP_H/2, MAP_W, 2, 6);
+        addWall(-MAP_W/2, 0, 2, MAP_H, 6);
+        addWall( MAP_W/2, 0, 2, MAP_H, 6);
+        addWall(-40, -32, 2, 28, 6);
+        addWall(-40,   16, 2, 28, 6);
+        addWall( 40, -48, 2, 28, 6);
+        addWall( 40,   0, 2, 28, 6);
+        addWall( 40,  48, 2, 28, 6);
+        addWall(-48, -20, 40, 2, 6);
+        addWall( 12, -20, 40, 2, 6);
+        addWall(-60,  30, 40, 2, 6);
+        addWall( 20,  30, 40, 2, 6);
+
+        // Paper-bag style goal
+        const BAG = { w: 1.2, d: 0.8, h: 2.2 };
+        const BAG_POS = new BABYLON.Vector3(0, 0, -28);
+        const rim = 0.12;
+        const bagMat = new BABYLON.StandardMaterial("bagMat", scene);
+        try {
+          bagMat.diffuseTexture = new BABYLON.Texture("textures/bag_diffuse.jpg", scene);
+          bagMat.diffuseTexture.wrapU = bagMat.diffuseTexture.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+          bagMat.diffuseTexture.uScale = 1; bagMat.diffuseTexture.vScale = 1.8;
+        } catch(e) {}
+        if (!bagMat.diffuseTexture) bagMat.diffuseColor = new BABYLON.Color3(0.84,0.72,0.56);
+        bagMat.specularColor = new BABYLON.Color3(0,0,0);
+        function addBagWall(px, pz, w, d){
+          const m = BABYLON.MeshBuilder.CreateBox("bagWall", { width:w, height:BAG.h, depth:d }, scene);
+          m.position.set(px, BAG.h/2, pz);
+          m.material = bagMat; m.checkCollisions = true; m.receiveShadows = true;
+          return m;
+        }
+        addBagWall(BAG_POS.x, BAG_POS.z - (BAG.d/2 - rim/2), BAG.w, rim);
+        addBagWall(BAG_POS.x, BAG_POS.z + (BAG.d/2 - rim/2), BAG.w, rim);
+        addBagWall(BAG_POS.x - (BAG.w/2 - rim/2), BAG_POS.z, rim, BAG.d);
+        addBagWall(BAG_POS.x + (BAG.w/2 - rim/2), BAG_POS.z, rim, BAG.d);
+        const GOAL_OPEN = {
+          minX: BAG_POS.x - (BAG.w/2 - rim),
+          maxX: BAG_POS.x + (BAG.w/2 - rim),
+          minZ: BAG_POS.z - (BAG.d/2 - rim),
+          maxZ: BAG_POS.z + (BAG.d/2 - rim),
+          rimY: BAG.h + 0.02
+        };
+
+        // Player
+        const radius = 1;
+        const player = BABYLON.MeshBuilder.CreateSphere("player", { diameter: radius*2, segments: 24 }, scene);
+        const BASE_Y = radius;
+        player.position = new BABYLON.Vector3(0, BASE_Y, 0);
+        player.checkCollisions = true;
+        const pMat = new BABYLON.StandardMaterial("pMat", scene);
+        pMat.diffuseColor = new BABYLON.Color3(0.95, 0.95, 1);
+        pMat.specularPower = 64;
+        pMat.specularColor = new BABYLON.Color3(0.4,0.4,0.5);
+        player.material = pMat; sg.addShadowCaster(player);
+
+        // Camera follow
+        const cam = new BABYLON.FreeCamera("cam", player.position.add(new BABYLON.Vector3(0, 6, -14)), scene);
+        cam.minZ = 0.1; cam.maxZ = 10000;
+        cam.attachControl(canvas, false);
+        scene.activeCamera = cam;
+        let yaw = 0;
+        const camHeight = 6, camDistance = 14, followSpeed = 8;
+        function headingVec(){ return new BABYLON.Vector3(Math.sin(yaw), 0, Math.cos(yaw)); }
+
+        // Keyboard
+        const keys = { w:false, a:false, s:false, d:false, space:false, f:false };
+        addEventListener('keydown', (e)=>{ if(e.repeat) return;
+          if(e.key==='w'||e.key==='W') keys.w=true;
+          if(e.key==='a'||e.key==='A') keys.a=true;
+          if(e.key==='s'||e.key==='S') keys.s=true;
+          if(e.key==='d'||e.key==='D') keys.d=true;
+          if(e.code==='Space') keys.space=true;
+          if(e.key==='f'||e.key==='F') keys.f=true;
+          if(e.shiftKey && (e.key==='R' || e.key==='r')) { seedPickups(); resetScores(); scoredCount = 0; updateBallCounters(); send('reset', {}); }
+        });
+        addEventListener('keyup', (e)=>{
+          if(e.key==='w'||e.key==='W') keys.w=false;
+          if(e.key==='a'||e.key==='A') keys.a=false;
+          if(e.key==='s'||e.key==='S') keys.s=false;
+          if(e.key==='d'||e.key==='D') keys.d=false;
+          if(e.code==='Space') keys.space=false;
+          if(e.key==='f'||e.key==='F') keys.f=false;
+        });
+
+        // Movement physics
+        let vx=0, vz=0, vy=0;
+        const accel=28, maxSpeed=15, friction=6, gravity=30, jumpSpeed=12;
+        const bounciness=0.45, bounceThreshold=2.0;
+        let grounded=true;
+
+        // Pickups / projectiles
+        const PICKUP_DIAM = 0.5;
+        const carryAboveOffset = radius + 1.0;
+
+        const pickupMat = new BABYLON.StandardMaterial('pickupMat', scene);
+        pickupMat.diffuseColor  = new BABYLON.Color3(0.95, 0.8, 0.3);
+        pickupMat.emissiveColor = new BABYLON.Color3(0.2, 0.15, 0);
+
+        const throwMat = new BABYLON.StandardMaterial('throwMat', scene);
+        throwMat.diffuseColor  = new BABYLON.Color3(0.8,0.9,1);
+        throwMat.specularColor = new BABYLON.Color3(0.1,0.1,0.15);
+
+        const pickups = new Map();
+        const projectiles = new Map(); // id -> {mesh, vel, owner, scored}
+        const SCORED_BALLS = new Set();
+
+        const INITIAL_BALLS = 20;
+        function seedPickups(){
+          for (const [,m] of pickups){ m.dispose(); }
+          pickups.clear();
+          for (const [, pr] of projectiles){ pr.mesh.dispose(); }
+          projectiles.clear();
+          SCORED_BALLS.clear();
+          scoredCount = 0; updateBallCounters();
+          const r = 40, n = INITIAL_BALLS;
+          for (let i=0; i<n; i++){
+            const ang = (i / n) * Math.PI * 2;
+            const s = BABYLON.MeshBuilder.CreateSphere('pickup_'+i, { diameter: PICKUP_DIAM, segments: 12 }, scene);
+            s.position.set(Math.cos(ang)*r, PICKUP_DIAM*0.5, Math.sin(ang)*r);
+            s.material = pickupMat; sg.addShadowCaster(s);
+            pickups.set(i, s);
+          }
+        }
+        let totalBalls = INITIAL_BALLS;
+        let scoredCount = 0;
+        function updateBallCounters(){
+          document.getElementById('ballTotal').textContent = String(totalBalls);
+          document.getElementById('ballScored').textContent = String(scoredCount);
+        }
+        updateBallCounters();
+        seedPickups();
+
+        let hasBall = false, carryId = null, carryMesh = null;
+
+        function tryPickupNearby(){
+          if (hasBall) return;
+          for (const [id, m] of pickups){
+            if (SCORED_BALLS.has(id)) continue;
+            const dx = m.position.x - player.position.x;
+            const dz = m.position.z - player.position.z;
+            if (dx*dx + dz*dz < 1.6*1.6){
+              carryId = id; carryMesh = m; pickups.delete(id);
+              carryMesh.material = throwMat; hasBall = true;
+              send('pickup', { idx: id });
+              break;
+            }
+          }
+        }
+        function updateCarryVisual(){
+          if (!hasBall || !carryMesh) return;
+          carryMesh.position.copyFrom(player.position);
+          carryMesh.position.y = carryAboveOffset;
+        }
+
+        // HUD that stays centered on the player (dot is clamped inside)
+        const hudCircle = document.getElementById('hudCircle');
+        const aimDot = document.getElementById('aimDot');
+        const hudText = document.getElementById('hudText');
+
+        function hudRadiusPx(){ return 120; } // fixed radius near the player
+        function setHudRadius(){
+          const r = hudRadiusPx();
+          hudCircle.style.width = (r*2) + 'px';
+          hudCircle.style.height = (r*2) + 'px';
+        }
+        setHudRadius();
+        addEventListener('resize', setHudRadius);
+
+        // Pointer position (free), dot stays clamped around the projected player
+        let pointerX = window.innerWidth / 2;
+        let pointerY = window.innerHeight / 2;
+
+        addEventListener('mousemove', (e)=> { pointerX = e.clientX; pointerY = e.clientY; }, { passive: true });
+        addEventListener('touchmove', (e)=> {
+          const t = e.touches[0]; if (!t) return;
+          pointerX = t.clientX; pointerY = t.clientY;
+        }, { passive: true });
+
+        // rX/rY are the clamped offsets (in px) of aimDot from the player's screen position
+        let rX = 0, rY = 0;
+        function updateHudAroundPlayer(){
+          // project a point a bit above the player so the circle sits nicely
+          const anchor = player.position.add(new BABYLON.Vector3(0, 2.0, 0));
+          const scr = worldToScreen(anchor);
+          const centerX = scr.x, centerY = scr.y;
+          const r = hudRadiusPx();
+
+          // position circle center on player
+          hudCircle.style.left = centerX + 'px';
+          hudCircle.style.top  = centerY + 'px';
+
+          // vector from center to pointer, clamp to radius
+          let dx = pointerX - centerX;
+          let dy = pointerY - centerY;
+          const len = Math.hypot(dx, dy);
+          if (len > r) { dx *= r/len; dy *= r/len; }
+          rX = dx; rY = dy;
+
+          // place the green dot
+          aimDot.style.left = (centerX + dx) + 'px';
+          aimDot.style.top  = (centerY + dy) + 'px';
+        }
+
+        // Throw force
+        const forceSlider = document.getElementById('forceSlider');
+        const forceVal = document.getElementById('forceVal');
+        let forceMul = parseFloat(forceSlider.value);
+        forceSlider.addEventListener('input', ()=>{
+          forceMul = parseFloat(forceSlider.value);
+          forceVal.textContent = forceMul.toFixed(2) + '×';
+        });
+
+        // Aim & velocity (based on rX/rY relative to player-centered circle)
+        function aimAnglesFromDot(){
+          const r = hudRadiusPx() || 1;
+          const nx = rX / r; // -1..1
+          const ny = rY / r; // -1..1
+          const MAX_YAW_OFF = BABYLON.Tools.ToRadians(70);
+          const yawAim = yaw + nx * MAX_YAW_OFF;
+          const PITCH_MIN = BABYLON.Tools.ToRadians(15);
+          const PITCH_MAX = BABYLON.Tools.ToRadians(75);
+          const t = (1 - (ny + 1)/2);
+          const pitch = PITCH_MIN + t * (PITCH_MAX - PITCH_MIN);
+          return { yawAim, pitch };
+        }
+        function computeThrowVelocityFromDot(){
+          const { yawAim, pitch } = aimAnglesFromDot();
+          const baseV = 18 * forceMul;
+          const vxz = Math.cos(pitch), vy = Math.sin(pitch);
+          return new BABYLON.Vector3(Math.sin(yawAim) * baseV * vxz, baseV * vy, Math.cos(yawAim) * baseV * vxz);
+        }
+
+        function launchProjectileWithId(idx, start, vel, owner){
+          const m = carryMesh || BABYLON.MeshBuilder.CreateSphere('proj_'+idx, { diameter: PICKUP_DIAM, segments: 12 }, scene);
+          m.material = throwMat; m.position.copyFrom(start); sg.addShadowCaster(m);
+          projectiles.set(idx, { mesh: m, vel: vel.clone(), owner, scored:false });
+        }
+        function shootLocal(){
+          if (!hasBall || !carryMesh) return;
+          const dir = headingVec();
+          const start = player.position.add(new BABYLON.Vector3(0, carryAboveOffset, 0)).add(new BABYLON.Vector3(dir.x,0,dir.z).scale(radius+0.2));
+          const vel = computeThrowVelocityFromDot();
+          launchProjectileWithId(carryId, start, vel, myId || 'me');
+          send('shoot', { idx: carryId, x:start.x, y:start.y, z:start.z, vx:vel.x, vy:vel.y, vz:vel.z });
+          hasBall = false; carryMesh = null; carryId = null;
+        }
+
+        // Scoreboard
+        const scores = new Map();
+        function ensurePlayerEntry(id, name){ if (!scores.has(id)) scores.set(id, { name: name || 'Player', score: 0 }); }
+        function addScore(id, delta=1){ ensurePlayerEntry(id); scores.get(id).score += delta; renderScoreboard(); }
+        function resetScores(){ for (const [,rec] of scores) rec.score = 0; renderScoreboard(); }
+        function renderScoreboard(){
+          const ul = document.getElementById('scoreList');
+          const rows = [...scores.entries()].sort((a,b)=>b[1].score - a[1].score);
+          ul.innerHTML = rows.map(([id,rec]) => `<li><span>${rec.name}</span><span>${rec.score}</span></li>`).join('');
+        }
+        function makeNameTag(text){
+          const dt = new BABYLON.DynamicTexture("nameTag_"+text, {width:256, height:96}, scene, true);
+          const ctx = dt.getContext(); ctx.clearRect(0,0,256,96);
+          ctx.fillStyle = "rgba(0,0,0,0.75)"; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 3;
+          const r = 18;
+          ctx.beginPath(); ctx.moveTo(8+r, 8);
+          ctx.arcTo(248,8,248,88,r); ctx.arcTo(248,88,8,88,r); ctx.arcTo(8,88,8,8,r); ctx.arcTo(8,8,248,8,r);
+          ctx.closePath(); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = "#fff"; ctx.font = "bold 28px system-ui, -apple-system, Segoe UI, Roboto, Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(text, 128, 48); dt.update();
+          const m = new BABYLON.StandardMaterial("nameTagMat_"+text, scene);
+          m.diffuseTexture = dt; m.emissiveColor = new BABYLON.Color3(1,1,1); m.disableLighting = true; m.backFaceCulling = false;
+          const plane = BABYLON.MeshBuilder.CreatePlane("nameTagPlane_"+text, { width: 2.4, height: 0.9, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
+          plane.material = m; plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL; plane.isPickable = false;
+          return plane;
+        }
+
+        // Collisions/bounces
+        function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+        function bounceArena(pr, r, bounce=0.55){
+          const p = pr.mesh.position;
+          if (p.x < ARENA.minX + r) { p.x = ARENA.minX + r; pr.vel.x = -pr.vel.x * bounce; }
+          else if (p.x > ARENA.maxX - r) { p.x = ARENA.maxX - r; pr.vel.x = -pr.vel.x * bounce; }
+          if (p.z < ARENA.minZ + r) { p.z = ARENA.minZ + r; pr.vel.z = -pr.vel.z * bounce; }
+          else if (p.z > ARENA.maxZ - r) { p.z = ARENA.maxZ - r; pr.vel.z = -pr.vel.z * bounce; }
+        }
+        function bounceWalls(pr, r, bounce=0.55){
+          const p = pr.mesh.position;
+          for (let i=0; i<WALLS.length; i++){
+            const w = WALLS[i];
+            if (p.y > w.h + r) continue; // allow throws over tall walls
+            const qx = clamp(p.x, w.minX, w.maxX);
+            const qz = clamp(p.z, w.minZ, w.maxZ);
+            const dx = p.x - qx, dz = p.z - qz;
+            if (dx*dx + dz*dz < r*r){
+              const penX = Math.min(Math.abs((w.minX - (p.x - r))), Math.abs((p.x + r) - w.maxX));
+              const penZ = Math.min(Math.abs((w.minZ - (p.z - r))), Math.abs((p.z + r) - w.maxZ));
+              if (penX < penZ){
+                p.x = (p.x < (w.minX + w.maxX)/2) ? w.minX - r : w.maxX + r;
+                pr.vel.x = -pr.vel.x * bounce; pr.vel.z *= 0.98;
+              } else {
+                p.z = (p.z < (w.minZ + w.maxZ)/2) ? w.minZ - r : w.maxZ + r;
+                pr.vel.z = -pr.vel.z * bounce; pr.vel.x *= 0.98;
+              }
+            }
+          }
+        }
+
+        // Scoring
+        function checkGoalScore(id, pr){
+          if (pr.scored) return true;
+          const p = pr.mesh.position;
+          if (p.y < GOAL_OPEN.rimY &&
+              p.x > GOAL_OPEN.minX && p.x < GOAL_OPEN.maxX &&
+              p.z > GOAL_OPEN.minZ && p.z < GOAL_OPEN.maxZ) {
+            pr.scored = true; pr.vel.set(0,0,0);
+            pr.mesh.position.y = Math.max(p.y, PICKUP_DIAM*0.5 + 0.02);
+            SCORED_BALLS.add(id); projectiles.delete(id);
+            scoredCount++; updateBallCounters();
+            addScore(pr.owner || myId || 'me', 1);
+            send('score', { id: pr.owner || myId, name: (scores.get(pr.owner||myId)||{}).name || playerName, idx: id });
+            return true;
+          }
+          return false;
+        }
+
+        // --- Networking (same-origin WS for Railway) ---
+        const WS_URL = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host;
+
+        let ws, myId = null;
+        const peers = new Map();
+        let pendingSnapshot = null;
+
+        function addPeer(id,p){
+          if (peers.has(id)) return;
+          const s = BABYLON.MeshBuilder.CreateSphere('peer_'+id, { diameter: radius*2, segments: 16 }, scene);
+          const m = new BABYLON.StandardMaterial('pm_'+id, scene);
+          m.diffuseColor = new BABYLON.Color3(0.7 + Math.random()*0.3, 0.7, 0.7 + Math.random()*0.3);
+          m.specularColor = new BABYLON.Color3(0.2,0.2,0.25);
+          s.material = m; s.position.set(p.x||0, BASE_Y, p.z||0); s.checkCollisions = true;
+          const tag = makeNameTag(p.name || 'Player'); tag.parent = s; tag.position = new BABYLON.Vector3(0, radius + 1.6, 0);
+          peers.set(id, { mesh: s, tag }); ensurePlayerEntry(id, p.name); renderScoreboard();
+        }
+        function removePeer(id){ const peer = peers.get(id); if (!peer) return; peer.tag.dispose(); peer.mesh.dispose(); peers.delete(id); scores.delete(id); renderScoreboard(); }
+        function updatePeer(id,p){ if (id===myId) return; const peer=peers.get(id); if (!peer) return; peer.mesh.position.x=p.x; peer.mesh.position.z=p.z; }
+        function setPeerName(id,name){ ensurePlayerEntry(id,name); const peer=peers.get(id); if (peer){ peer.tag.dispose(); const tag=makeNameTag(name); tag.parent=peer.mesh; tag.position = new BABYLON.Vector3(0, radius + 1.6, 0); peers.get(id).tag=tag; } renderScoreboard(); }
+
+        function connectWS(){
+          try {
+            ws = new WebSocket(WS_URL);
+            ws.onopen = ()=> send('join', { x: player.position.x, z: player.position.z, name: playerName });
+            ws.onmessage = (ev)=>{
+              const msg = JSON.parse(ev.data);
+              if (msg.t === 'hello'){ myId = msg.id; ensurePlayerEntry(myId, playerName); renderScoreboard(); send('name', { name: playerName }); }
+              else if (msg.t === 'snapshot'){
+                for (const [id,p] of Object.entries(msg.players)) if (id !== myId) addPeer(id,p);
+                if (msg.scores) for (const [id,sc] of Object.entries(msg.scores)){ ensurePlayerEntry(id, sc.name); scores.get(id).score = sc.score|0; }
+                renderScoreboard();
+              } else if (msg.t === 'add'){ if (msg.id !== myId) addPeer(msg.id, msg.p||{}); }
+              else if (msg.t === 'remove'){ removePeer(msg.id); }
+              else if (msg.t === 'state'){ updatePeer(msg.id, msg.p); }
+              else if (msg.t === 'name'){ if (msg.id !== myId) setPeerName(msg.id, msg.p && msg.p.name); }
+              else if (msg.t === 'pickup'){ if (pickups.has(msg.id2)) { const m = pickups.get(msg.id2); m.dispose(); pickups.delete(msg.id2); } }
+              else if (msg.t === 'shoot'){
+                const start = new BABYLON.Vector3(msg.p.x,msg.p.y,msg.p.z);
+                const vel = new BABYLON.Vector3(msg.p.vx,msg.p.vy,msg.p.vz);
+                let m = pickups.get(msg.p.idx); if (m) pickups.delete(msg.p.idx);
+                launchProjectileWithId(msg.p.idx, start, vel, msg.id);
+              } else if (msg.t === 'land'){
+                const id2 = msg.p.idx; const pr = projectiles.get(id2);
+                if (pr && !pr.scored){ pr.mesh.material = pickupMat; pr.mesh.position.y = PICKUP_DIAM*0.5; projectiles.delete(id2); pickups.set(id2, pr.mesh); }
+              } else if (msg.t === 'score'){
+                ensurePlayerEntry(msg.id, msg.p && msg.p.name); addScore(msg.id,1); scoredCount++; updateBallCounters();
+                if (typeof msg.p?.idx === "number"){
+                  SCORED_BALLS.add(msg.p.idx);
+                  const pr=projectiles.get(msg.p.idx); if (pr){ pr.scored=true; pr.vel.set(0,0,0); projectiles.delete(msg.p.idx); }
+                  const m=pickups.get(msg.p.idx); if (m){ m.dispose(); pickups.delete(msg.p.idx); }
+                }
+              } else if (msg.t === 'reset'){ seedPickups(); resetScores(); scoredCount=0; updateBallCounters(); }
+            };
+            ws.onclose = ()=> setTimeout(connectWS, 1000);
+          } catch(e) { console.warn('WS connect failed', e); }
+        }
+        function send(t,p){ if (ws && ws.readyState===1) ws.send(JSON.stringify({t,p})); }
+        connectWS();
+
+        // Predict landing (for HUD text)
+        function predictLandingPoint(){
+          const vel = computeThrowVelocityFromDot();
+          const start = player.position.add(new BABYLON.Vector3(0, carryAboveOffset, 0));
+          const r = PICKUP_DIAM * 0.5;
+          const a = 0.5*gravity, b = -vel.y, c = start.y - r;
+          const disc = b*b - 4*a*c; if (disc < 0) return null;
+          const t1 = (-b - Math.sqrt(disc)) / (2*a);
+          const t2 = (-b + Math.sqrt(disc)) / (2*a);
+          const t = (t1 > 0 ? t1 : (t2 > 0 ? t2 : null)); if (!t) return null;
+          const hit = start.add(new BABYLON.Vector3(vel.x*t, vel.y*t - 0.5*gravity*t*t, vel.z*t));
+          hit.y = r; return { point: hit, time: t };
+        }
+
+        // Frame loop
+        let netAccum = 0;
+        scene.onBeforeRenderObservable.add(()=>{
+          const dt = engine.getDeltaTime()/1000;
+
+          // Rotate with A/D
+          const turnSpeed = BABYLON.Tools.ToRadians(180);
+          if (keys.a) yaw -= turnSpeed * dt;
+          if (keys.d) yaw += turnSpeed * dt;
+
+          const fwd = headingVec();
+          let ax = 0, az = 0;
+          if (keys.w) { ax += fwd.x * accel; az += fwd.z * accel; }
+          if (keys.s) { ax -= fwd.x * accel; az -= fwd.z * accel; }
+
+          vx += ax * dt; vz += az * dt;
+
+          if ((ax === 0 && az === 0) && grounded){
+            const sp = Math.hypot(vx, vz);
+            if (sp>0){ const decel = Math.min(friction*dt, 1); vx *= (1-decel); vz *= (1-decel); }
+          }
+
+          const sp2 = vx*vx + vz*vz;
+          if (sp2 > maxSpeed*maxSpeed){ const s = maxSpeed/Math.sqrt(sp2); vx*=s; vz*=s; }
+
+          if (grounded && keys.space){ vy = jumpSpeed; grounded=false; }
+          vy -= gravity*dt;
+
+          const disp = new BABYLON.Vector3(vx*dt, vy*dt, vz*dt);
+          const before = player.position.clone();
+          player.moveWithCollisions(disp);
+
+          if (player.position.y <= BASE_Y){
+            if (vy < -bounceThreshold){ player.position.y = BASE_Y + 0.0001; vy = -vy*bounciness; grounded = false; }
+            else { player.position.y = BASE_Y; vy = 0; grounded = true; }
+          }
+
+          // roll visual
+          const dx = player.position.x - before.x;
+          const dz = player.position.z - before.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > 1e-4){
+            const axis = new BABYLON.Vector3(dz, 0, -dx).normalize();
+            const angle = dist / radius;
+            player.rotate(axis, angle);
+          }
+
+          if (!hasBall) tryPickupNearby();
+          updateCarryVisual();
+
+          // Update HUD center/dot around the player every frame
+          updateHudAroundPlayer();
+
+          // Projectiles
+          for (const [id, pr] of [...projectiles]){
+            pr.vel.y -= gravity * dt;
+            pr.mesh.position.addInPlace(pr.vel.scale(dt));
+            const r = PICKUP_DIAM * 0.5;
+            if (pr.mesh.position.y <= r) {
+              pr.mesh.position.y = r + 0.0001;
+              if (Math.abs(pr.vel.y) > 0.5) { pr.vel.y = -pr.vel.y * 0.35; pr.vel.x *= 0.98; pr.vel.z *= 0.98; }
+              else { pr.vel.y = 0; pr.vel.x *= 0.92; pr.vel.z *= 0.92; }
+            }
+            bounceArena(pr, r, 0.55);
+            bounceWalls(pr, r, 0.55);
+            if (checkGoalScore(id, pr)) continue;
+            if (!pr.scored && pr.mesh.position.y <= r + 0.001 && pr.vel.lengthSquared() < 0.02) {
+              pr.mesh.material = pickupMat; pr.mesh.position.y = PICKUP_DIAM * 0.5;
+              projectiles.delete(id); pickups.set(id, pr.mesh); send('land', { idx: id, x: pr.mesh.position.x, z: pr.mesh.position.z });
+            }
+          }
+
+          // Camera follow behind the ball
+          const desiredCamPos = player.position.add(new BABYLON.Vector3(0, camHeight, 0)).subtract(new BABYLON.Vector3(fwd.x,0,fwd.z).scale(camDistance));
+          cam.position.x += (desiredCamPos.x - cam.position.x) * dt * followSpeed;
+          cam.position.y += (desiredCamPos.y - cam.position.y) * dt * followSpeed;
+          cam.position.z += (desiredCamPos.z - cam.position.z) * dt * followSpeed;
+          cam.setTarget(player.position.add(new BABYLON.Vector3(0, 2.5, 0)));
+
+          // HUD feedback text
+          const pred = predictLandingPoint();
+          if (pred){
+            const distXZ = Math.hypot(pred.point.x - player.position.x, pred.point.z - player.position.z);
+            const { pitch } = aimAnglesFromDot();
+            hudText.textContent = `Aim: ~${distXZ.toFixed(1)}m · pitch=${BABYLON.Tools.ToDegrees(pitch).toFixed(0)}° · force=${forceMul.toFixed(2)}×`;
+          } else {
+            hudText.textContent = `Aim: — · force=${forceMul.toFixed(2)}×`;
+          }
+
+          // Networking tick + throw
+          netAccum += dt;
+          if (netAccum > 0.05){ netAccum = 0; send('state', { x: player.position.x, z: player.position.z }); }
+          if (keys.f){ shootLocal(); keys.f = false; }
+        });
+
+        return scene;
+      }
+
+      const scene = createScene();
+      engine.runRenderLoop(()=>{ if (scene && scene.activeCamera) scene.render(); });
+      addEventListener('resize', ()=> engine.resize());
+
+      // Error overlay
+      (function(){
+        const el=document.createElement('div');
+        el.style.cssText='position:fixed;left:8px;top:8px;background:rgba(0,0,0,.75);color:#fff;padding:6px 8px;border-radius:6px;font:12px/1.3 monospace;z-index:9999;max-width:60ch;white-space:pre-wrap;display:none';
+        document.body.appendChild(el);
+        function show(err){ el.textContent='Error: '+err; el.style.display='block'; }
+        addEventListener('error',(e)=>show(e.message));
+        addEventListener('unhandledrejection',(e)=>show(e.reason&&e.reason.message?e.reason.message:String(e.reason)));
+      })();
+    </script>
+  </body>
+</html>

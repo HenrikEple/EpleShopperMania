@@ -54,7 +54,13 @@
   </head>
   <body>
     <canvas id="renderCanvas"></canvas>
+    <!-- SFX & music (autoplay requires a user gesture; started in JS) -->
+    <audio id="sfxThrow" src="sounds/bop.mp3" preload="auto"></audio>
+    <audio id="bgm" src="sounds/track.mp3" preload="auto" loop></audio>
     <div class="ui">
+      <button id="muteBtn" class="hint" style="position:absolute;right:12px;bottom:12px;pointer-events:auto;">
+        🔊 Sound: On (M)
+      </button>
       <div class="banner">Aim by moving your mouse/trackpad. Shift+R resets balls and scores.</div>
       <div class="hint">W forward · S backward · A/D rotate · Space jump · F throw · Walk into a ball to pick up</div>
 
@@ -80,6 +86,72 @@
     <script>
       const canvas = document.getElementById("renderCanvas");
       const engine = new BABYLON.Engine(canvas, true);
+
+      // === Audio setup ===
+      const sfxThrow = document.getElementById('sfxThrow');
+      const bgm = document.getElementById('bgm');
+      const muteBtn = document.getElementById('muteBtn');
+
+      let soundEnabled = true;   // master toggle for all sounds
+      let musicEnabled = true;   // background music toggle
+
+      // default volumes (tweak to taste)
+      if (bgm) bgm.volume = 0.35;
+      if (sfxThrow) sfxThrow.volume = 0.8;
+
+      // Unlock audio on first user gesture (required by most browsers)
+      let audioUnlocked = false;
+      function unlockAudioOnce() {
+        if (audioUnlocked) return;
+        audioUnlocked = true;
+        if (musicEnabled && soundEnabled && bgm) {
+          bgm.play().catch(() => { /* ignored; user can toggle with M */ });
+        }
+      }
+      window.addEventListener('keydown', unlockAudioOnce, { once: false });
+      window.addEventListener('mousedown', unlockAudioOnce, { once: false });
+      window.addEventListener('touchstart', unlockAudioOnce, { passive: true, once: false });
+
+      function updateMuteUI() {
+        if (!muteBtn) return;
+        muteBtn.textContent = (soundEnabled ? '🔊 Sound: On (M)' : '🔇 Sound: Off (M)');
+      }
+      if (muteBtn) {
+        muteBtn.addEventListener('click', () => {
+          soundEnabled = !soundEnabled;
+          if (!soundEnabled && bgm) { bgm.pause(); }
+          else if (musicEnabled && bgm) { bgm.play().catch(()=>{}); }
+          updateMuteUI();
+        });
+      }
+      window.addEventListener('keydown', (e) => {
+        if (e.key && e.key.toLowerCase() === 'm') {
+          soundEnabled = !soundEnabled;
+          if (!soundEnabled && bgm) { bgm.pause(); }
+          else if (musicEnabled && bgm) { bgm.play().catch(()=>{}); }
+          updateMuteUI();
+        }
+      });
+      updateMuteUI();
+
+      // Optional: 'N' toggles music only (keeps SFX)
+      window.addEventListener('keydown', (e) => {
+        if (e.key && e.key.toLowerCase() === 'n') {
+          musicEnabled = !musicEnabled;
+          if (!musicEnabled && bgm) bgm.pause();
+          else if (soundEnabled && bgm) bgm.play().catch(()=>{});
+        }
+      });
+
+      // Helper to play throw SFX safely
+      function playBop(volume = 0.8) {
+        if (!soundEnabled || !sfxThrow) return;
+        try {
+          sfxThrow.currentTime = 0;
+        } catch(_) {}
+        sfxThrow.volume = volume;
+        sfxThrow.play().catch(()=>{});
+      }
 
       // Ask name
       let playerName = "";
@@ -402,6 +474,8 @@
         }
         function shootLocal(){
           if (!hasBall || !carryMesh) return;
+          // Play bop locally
+          playBop(0.9);
           const dir = headingVec();
           const start = player.position.add(new BABYLON.Vector3(0, carryAboveOffset, 0)).add(new BABYLON.Vector3(dir.x,0,dir.z).scale(radius+0.2));
           const vel = computeThrowVelocityFromDot();
@@ -528,6 +602,8 @@
                 const vel = new BABYLON.Vector3(msg.p.vx,msg.p.vy,msg.p.vz);
                 let m = pickups.get(msg.p.idx); if (m) pickups.delete(msg.p.idx);
                 launchProjectileWithId(msg.p.idx, start, vel, msg.id);
+                // Quieter bop for remote players
+                playBop(0.5);
               } else if (msg.t === 'land'){
                 const id2 = msg.p.idx; const pr = projectiles.get(id2);
                 if (pr && !pr.scored){ pr.mesh.material = pickupMat; pr.mesh.position.y = PICKUP_DIAM*0.5; projectiles.delete(id2); pickups.set(id2, pr.mesh); }
