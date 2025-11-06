@@ -6,10 +6,6 @@
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
 }

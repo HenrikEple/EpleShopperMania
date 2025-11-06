@@ -93,6 +93,7 @@
       const canvas = document.getElementById("renderCanvas");
       const engine = new BABYLON.Engine(canvas, true);
 
+      // Ask name
       let playerName = "";
       while (!playerName) {
         playerName = prompt("Enter your player name:");
@@ -104,6 +105,7 @@
         scene.clearColor = new BABYLON.Color4(0.72, 0.84, 1.0, 1.0);
         scene.collisionsEnabled = true;
 
+        // Lights
         const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
         hemi.intensity = 0.6;
         const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.6, -1.0, -0.2), scene);
@@ -112,6 +114,7 @@
         const sg = new BABYLON.ShadowGenerator(1024, sun);
         sg.useExponentialShadowMap = true;
 
+        // Helpers
         function makeChecker(size=1024, squares=16, a="#3f4d56", b="#34414a"){
           const dt = new BABYLON.DynamicTexture("checker", size, scene, true);
           const ctx = dt.getContext(); const s = size / squares;
@@ -129,6 +132,7 @@
           return { x: projected.x, y: projected.y, z: projected.z };
         }
 
+        // Arena
         const MAP_W = 240, MAP_H = 160;
         const ARENA = { minX: -MAP_W/2, maxX: MAP_W/2, minZ: -MAP_H/2, maxZ: MAP_H/2 };
 
@@ -140,6 +144,7 @@
         floorTex.onLoadObservable.addOnce(()=>{ gMat.diffuseTexture = floorTex; floorTex.uScale = 12; floorTex.vScale = 12; });
         ground.material = gMat; ground.checkCollisions = true; ground.receiveShadows = true;
 
+        // Walls
         const WALLS = [];
         const baseWallTex = new BABYLON.Texture("textures/wall_diffuse.jpg", scene);
         baseWallTex.wrapU = baseWallTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
@@ -168,6 +173,7 @@
           WALLS.push({ minX: x - w/2, maxX: x + w/2, minZ: z - d/2, maxZ: z + d/2, h });
           return box;
         }
+        // Closed border + partitions
         addWall(0, -MAP_H/2, MAP_W, 2, 6);
         addWall(0,  MAP_H/2, MAP_W, 2, 6);
         addWall(-MAP_W/2, 0, 2, MAP_H, 6);
@@ -182,7 +188,7 @@
         addWall(-60,  30, 40, 2, 6);
         addWall( 20,  30, 40, 2, 6);
 
-        // Paper-bag goal
+        // Paper-bag style goal
         const BAG = { w: 1.2, d: 0.8, h: 2.2 };
         const BAG_POS = new BABYLON.Vector3(0, 0, -28);
         const rim = 0.12;
@@ -224,7 +230,7 @@
         pMat.specularColor = new BABYLON.Color3(0.4,0.4,0.5);
         player.material = pMat; sg.addShadowCaster(player);
 
-        // Camera
+        // Camera follow
         const cam = new BABYLON.FreeCamera("cam", player.position.add(new BABYLON.Vector3(0, 6, -14)), scene);
         cam.minZ = 0.1; cam.maxZ = 10000;
         cam.attachControl(canvas, false);
@@ -233,7 +239,7 @@
         const camHeight = 6, camDistance = 14, followSpeed = 8;
         function headingVec(){ return new BABYLON.Vector3(Math.sin(yaw), 0, Math.cos(yaw)); }
 
-        // Keyboard input
+        // Keyboard
         const keys = { w:false, a:false, s:false, d:false, space:false, f:false };
         addEventListener('keydown', (e)=>{ if(e.repeat) return;
           if(e.key==='w'||e.key==='W') keys.w=true;
@@ -253,13 +259,13 @@
           if(e.key==='f'||e.key==='F') keys.f=false;
         });
 
-        // Movement
+        // Movement physics
         let vx=0, vz=0, vy=0;
         const accel=28, maxSpeed=15, friction=6, gravity=30, jumpSpeed=12;
         const bounciness=0.45, bounceThreshold=2.0;
         let grounded=true;
 
-        // Pickups & projectiles
+        // Pickups / projectiles
         const PICKUP_DIAM = 0.5;
         const carryAboveOffset = radius + 1.0;
 
@@ -323,7 +329,7 @@
           carryMesh.position.y = carryAboveOffset;
         }
 
-        // HUD (no click needed: follows mouse/trackpad)
+        // HUD (mouse-follow)
         const hudCircle = document.getElementById('hudCircle');
         const reticle = document.getElementById('reticle');
         const landingMarker = document.getElementById('landingMarker');
@@ -353,15 +359,13 @@
           const cx = window.innerWidth/2, cy = window.innerHeight/2;
           setReticle(clientX - cx, clientY - cy);
         }
-        // Move HUD continuously with mouse/trackpad
         addEventListener('mousemove', (e)=> updateReticleFromPointer(e.clientX, e.clientY), { passive: true });
-        // Touch support
         addEventListener('touchmove', (e)=> {
           const t = e.touches[0]; if (!t) return;
           updateReticleFromPointer(t.clientX, t.clientY);
         }, { passive: true });
 
-        // Throw force slider
+        // Throw force
         const forceSlider = document.getElementById('forceSlider');
         const forceVal = document.getElementById('forceVal');
         let forceMul = parseFloat(forceSlider.value);
@@ -370,15 +374,16 @@
           forceVal.textContent = forceMul.toFixed(2) + '×';
         });
 
+        // Aim & velocity
         function aimAnglesFromReticle(){
           const r = hudRadiusPx() || 1;
           const nx = rX / r; // -1..1
-          const ny = rY / r; // -1..1 (down is +)
+          const ny = rY / r; // -1..1 (down +)
           const MAX_YAW_OFF = BABYLON.Tools.ToRadians(70);
           const yawAim = yaw + nx * MAX_YAW_OFF;
           const PITCH_MIN = BABYLON.Tools.ToRadians(15);
           const PITCH_MAX = BABYLON.Tools.ToRadians(75);
-          const t = (1 - (ny + 1)/2); // ny:-1..1 -> 1..0
+          const t = (1 - (ny + 1)/2);
           const pitch = PITCH_MIN + t * (PITCH_MAX - PITCH_MIN);
           return { yawAim, pitch };
         }
@@ -404,7 +409,7 @@
           hasBall = false; carryMesh = null; carryId = null;
         }
 
-        // Scoreboard (peers’ name tags hidden for self as earlier)
+        // Scoreboard
         const scores = new Map();
         function ensurePlayerEntry(id, name){ if (!scores.has(id)) scores.set(id, { name: name || 'Player', score: 0 }); }
         function addScore(id, delta=1){ ensurePlayerEntry(id); scores.get(id).score += delta; renderScoreboard(); }
@@ -431,6 +436,7 @@
           return plane;
         }
 
+        // Collisions/bounces
         function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
         function bounceArena(pr, r, bounce=0.55){
           const p = pr.mesh.position;
@@ -443,7 +449,7 @@
           const p = pr.mesh.position;
           for (let i=0; i<WALLS.length; i++){
             const w = WALLS[i];
-            if (p.y > w.h + r) continue;
+            if (p.y > w.h + r) continue; // allow throws over tall walls
             const qx = clamp(p.x, w.minX, w.maxX);
             const qz = clamp(p.z, w.minZ, w.maxZ);
             const dx = p.x - qx, dz = p.z - qz;
@@ -460,6 +466,8 @@
             }
           }
         }
+
+        // Scoring
         function checkGoalScore(id, pr){
           if (pr.scored) return true;
           const p = pr.mesh.position;
@@ -477,14 +485,12 @@
           return false;
         }
 
-        // Networking
-        const host = (location.hostname === '' ? 'localhost' : location.hostname);
-        const isLocalHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host);
-        const scheme = (isLocalHost || location.protocol === 'http:') ? 'ws' : 'wss';
-        // In index.html
-        const WS_URL = 'wss://<your-service-name>.up.railway.app';
+        // --- Networking (same-origin WS for Railway) ---
+        const WS_URL = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host;
+
         let ws, myId = null;
         const peers = new Map();
+
         function addPeer(id,p){
           if (peers.has(id)) return;
           const s = BABYLON.MeshBuilder.CreateSphere('peer_'+id, { diameter: radius*2, segments: 16 }, scene);
@@ -498,6 +504,7 @@
         function removePeer(id){ const peer = peers.get(id); if (!peer) return; peer.tag.dispose(); peer.mesh.dispose(); peers.delete(id); scores.delete(id); renderScoreboard(); }
         function updatePeer(id,p){ if (id===myId) return; const peer=peers.get(id); if (!peer) return; peer.mesh.position.x=p.x; peer.mesh.position.z=p.z; }
         function setPeerName(id,name){ ensurePlayerEntry(id,name); const peer=peers.get(id); if (peer){ peer.tag.dispose(); const tag=makeNameTag(name); tag.parent=peer.mesh; tag.position = new BABYLON.Vector3(0, radius + 1.6, 0); peers.get(id).tag=tag; } renderScoreboard(); }
+
         function connectWS(){
           try {
             ws = new WebSocket(WS_URL);
@@ -505,17 +512,31 @@
             ws.onmessage = (ev)=>{
               const msg = JSON.parse(ev.data);
               if (msg.t === 'hello'){ myId = msg.id; ensurePlayerEntry(myId, playerName); renderScoreboard(); send('name', { name: playerName }); }
-              else if (msg.t === 'snapshot'){ for (const [id,p] of Object.entries(msg.players)) if (id !== myId) addPeer(id,p);
-                if (msg.scores) for (const [id,sc] of Object.entries(msg.scores)){ ensurePlayerEntry(id, sc.name); scores.get(id).score = sc.score|0; } renderScoreboard();
+              else if (msg.t === 'snapshot'){
+                for (const [id,p] of Object.entries(msg.players)) if (id !== myId) addPeer(id,p);
+                if (msg.scores) for (const [id,sc] of Object.entries(msg.scores)){ ensurePlayerEntry(id, sc.name); scores.get(id).score = sc.score|0; }
+                renderScoreboard();
               } else if (msg.t === 'add'){ if (msg.id !== myId) addPeer(msg.id, msg.p||{}); }
               else if (msg.t === 'remove'){ removePeer(msg.id); }
               else if (msg.t === 'state'){ updatePeer(msg.id, msg.p); }
               else if (msg.t === 'name'){ if (msg.id !== myId) setPeerName(msg.id, msg.p && msg.p.name); }
               else if (msg.t === 'pickup'){ if (pickups.has(msg.id2)) { const m = pickups.get(msg.id2); m.dispose(); pickups.delete(msg.id2); } }
-              else if (msg.t === 'shoot'){ const start = new BABYLON.Vector3(msg.p.x,msg.p.y,msg.p.z); const vel = new BABYLON.Vector3(msg.p.vx,msg.p.vy,msg.p.vz); let m = pickups.get(msg.p.idx); if (m) pickups.delete(msg.p.idx); launchProjectileWithId(msg.p.idx, start, vel, msg.id); }
-              else if (msg.t === 'land'){ const id2 = msg.p.idx; const pr = projectiles.get(id2); if (pr && !pr.scored){ pr.mesh.material = pickupMat; pr.mesh.position.y = PICKUP_DIAM*0.5; projectiles.delete(id2); pickups.set(id2, pr.mesh); } }
-              else if (msg.t === 'score'){ ensurePlayerEntry(msg.id, msg.p && msg.p.name); addScore(msg.id,1); scoredCount++; updateBallCounters(); if (typeof msg.p?.idx === "number"){ SCORED_BALLS.add(msg.p.idx); const pr=projectiles.get(msg.p.idx); if (pr){ pr.scored=true; pr.vel.set(0,0,0); projectiles.delete(msg.p.idx);} const m=pickups.get(msg.p.idx); if (m){ m.dispose(); pickups.delete(msg.p.idx);} } }
-              else if (msg.t === 'reset'){ seedPickups(); resetScores(); scoredCount=0; updateBallCounters(); }
+              else if (msg.t === 'shoot'){
+                const start = new BABYLON.Vector3(msg.p.x,msg.p.y,msg.p.z);
+                const vel = new BABYLON.Vector3(msg.p.vx,msg.p.vy,msg.p.vz);
+                let m = pickups.get(msg.p.idx); if (m) pickups.delete(msg.p.idx);
+                launchProjectileWithId(msg.p.idx, start, vel, msg.id);
+              } else if (msg.t === 'land'){
+                const id2 = msg.p.idx; const pr = projectiles.get(id2);
+                if (pr && !pr.scored){ pr.mesh.material = pickupMat; pr.mesh.position.y = PICKUP_DIAM*0.5; projectiles.delete(id2); pickups.set(id2, pr.mesh); }
+              } else if (msg.t === 'score'){
+                ensurePlayerEntry(msg.id, msg.p && msg.p.name); addScore(msg.id,1); scoredCount++; updateBallCounters();
+                if (typeof msg.p?.idx === "number"){
+                  SCORED_BALLS.add(msg.p.idx);
+                  const pr=projectiles.get(msg.p.idx); if (pr){ pr.scored=true; pr.vel.set(0,0,0); projectiles.delete(msg.p.idx); }
+                  const m=pickups.get(msg.p.idx); if (m){ m.dispose(); pickups.delete(msg.p.idx); }
+                }
+              } else if (msg.t === 'reset'){ seedPickups(); resetScores(); scoredCount=0; updateBallCounters(); }
             };
             ws.onclose = ()=> setTimeout(connectWS, 1000);
           } catch(e) { console.warn('WS connect failed', e); }
@@ -523,7 +544,7 @@
         function send(t,p){ if (ws && ws.readyState===1) ws.send(JSON.stringify({t,p})); }
         connectWS();
 
-        // Predict landing (HUD aim)
+        // Predict landing for HUD
         function predictLandingPoint(){
           const vel = computeThrowVelocityUsingHUD();
           const start = player.position.add(new BABYLON.Vector3(0, carryAboveOffset, 0));
@@ -542,6 +563,7 @@
         scene.onBeforeRenderObservable.add(()=>{
           const dt = engine.getDeltaTime()/1000;
 
+          // Rotate with A/D
           const turnSpeed = BABYLON.Tools.ToRadians(180);
           if (keys.a) yaw -= turnSpeed * dt;
           if (keys.d) yaw += turnSpeed * dt;
@@ -573,6 +595,7 @@
             else { player.position.y = BASE_Y; vy = 0; grounded = true; }
           }
 
+          // roll visual
           const dx = player.position.x - before.x;
           const dz = player.position.z - before.z;
           const dist = Math.hypot(dx, dz);
@@ -585,6 +608,7 @@
           if (!hasBall) tryPickupNearby();
           updateCarryVisual();
 
+          // Projectiles
           for (const [id, pr] of [...projectiles]){
             pr.vel.y -= gravity * dt;
             pr.mesh.position.addInPlace(pr.vel.scale(dt));
@@ -603,12 +627,14 @@
             }
           }
 
+          // Camera follow behind the ball
           const desiredCamPos = player.position.add(new BABYLON.Vector3(0, camHeight, 0)).subtract(new BABYLON.Vector3(fwd.x,0,fwd.z).scale(camDistance));
           cam.position.x += (desiredCamPos.x - cam.position.x) * dt * followSpeed;
           cam.position.y += (desiredCamPos.y - cam.position.y) * dt * followSpeed;
           cam.position.z += (desiredCamPos.z - cam.position.z) * dt * followSpeed;
           cam.setTarget(player.position.add(new BABYLON.Vector3(0, 2.5, 0)));
 
+          // HUD landing prediction
           const pred = predictLandingPoint();
           if (pred){
             const scr = worldToScreen(pred.point);
@@ -623,6 +649,7 @@
             hudText.textContent = `Aim: — · force=${forceMul.toFixed(2)}×`;
           }
 
+          // Networking tick + throw
           netAccum += dt;
           if (netAccum > 0.05){ netAccum = 0; send('state', { x: player.position.x, z: player.position.z }); }
           if (keys.f){ shootLocal(); keys.f = false; }
@@ -635,6 +662,7 @@
       engine.runRenderLoop(()=>{ if (scene && scene.activeCamera) scene.render(); });
       addEventListener('resize', ()=> engine.resize());
 
+      // Error overlay
       (function(){
         const el=document.createElement('div');
         el.style.cssText='position:fixed;left:8px;top:8px;background:rgba(0,0,0,.75);color:#fff;padding:6px 8px;border-radius:6px;font:12px/1.3 monospace;z-index:9999;max-width:60ch;white-space:pre-wrap;display:none';
