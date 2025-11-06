@@ -481,8 +481,7 @@
         const host = (location.hostname === '' ? 'localhost' : location.hostname);
         const isLocalHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host);
         const scheme = (isLocalHost || location.protocol === 'http:') ? 'ws' : 'wss';
-        // In index.html
-        const WS_URL = 'wss://<your-service-name>.up.railway.app';
+        const WS_URL = `${scheme}://${host}:3001`;
         let ws, myId = null;
         const peers = new Map();
         function addPeer(id,p){
